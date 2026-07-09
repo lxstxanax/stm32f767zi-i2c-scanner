@@ -239,6 +239,36 @@
             }
         },
         {
+            "label": "Serial Monitor (ST-Link VCP)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}/tools/serial_monitor.ps1"
+            ],
+            "isBackground": true,
+            "problemMatcher": [],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "dedicated",
+                "showReuseMessage": true,
+                "clear": true
+            },
+            "options": {
+                "statusbar": {
+                    "hide": false,
+                    "color": "#9b59b6",
+                    "detail": "Open a live 115200-baud serial view of the ST-Link VCP (auto-detects the COM port)",
+                    "icon": {
+                        "id": "output"
+                    }
+                }
+            }
+        },
+        {
             "label": "Post Debug Task",
             "type": "shell",
             "command": "echo 'Debug session ended.'",
