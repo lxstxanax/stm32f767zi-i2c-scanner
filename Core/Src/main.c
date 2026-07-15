@@ -229,11 +229,19 @@ int main(void)
     blink_count++;
     TSC1641_Update();
     if (tsc_online) {
-      printf("PSU set=%u mV | I=%ld uA | Vload=%lu mV | P=%lu mW\r\n",
-             psu_set_mv, (long)tsc_current_ua,
-             (unsigned long)tsc_vload_mv, (unsigned long)tsc_power_mw);
+      /* volts / amps with integer math: I LSB 0.0005 A, V LSB 0.002 V */
+      long i_ua = (long)tsc_current_ua;
+      unsigned long i_abs = (i_ua < 0) ? (unsigned long)(-i_ua) : (unsigned long)i_ua;
+      long v_mv = (long)tsc_vload_mv;
+      unsigned long v_abs = (v_mv < 0) ? (unsigned long)(-v_mv) : (unsigned long)v_mv;
+      printf("PSU set=%u.%03u V | I=%s%lu.%04lu A | Vload=%s%lu.%03lu V | P=%lu mW\r\n",
+             psu_set_mv / 1000U, psu_set_mv % 1000U,
+             (i_ua < 0) ? "-" : "", i_abs / 1000000UL, (i_abs % 1000000UL) / 100UL,
+             (v_mv < 0) ? "-" : "", v_abs / 1000UL, v_abs % 1000UL,
+             (unsigned long)tsc_power_mw);
     } else {
-      printf("PSU set=%u mV | TSC1641: no ACK on I2C (addr 0x40)\r\n", psu_set_mv);
+      printf("PSU set=%u.%03u V | TSC1641: no ACK on I2C (addr 0x40)\r\n",
+             psu_set_mv / 1000U, psu_set_mv % 1000U);
     }
     HAL_Delay(500);
   }
