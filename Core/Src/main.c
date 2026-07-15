@@ -24,7 +24,7 @@
 /* USER CODE BEGIN Includes */
 #define XNX_I2C_BUS (&hi2c1)
 #include "xnx_i2c.h"
-#include "max17320.h"
+#include "tsc1641.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -48,29 +48,10 @@
 xnx_i2c_scan_t i2c_scan_result;
 volatile uint32_t blink_count = 0;
 
-static uint16_t max17320_backup_buf[MAX17320_TARGET_CONFIG_COUNT];
-
-/* Set to 1 only when you are deliberately ready to write the shadow config
- * (does NOT touch NVM, safe/reversible until power cycle). */
-#define MAX17320_DO_WRITE_SHADOW_CONFIG 1
-
-/* Set to 1 only when you want this firmware to even attempt an NVM commit
- * after a clean shadow-config verify. Also requires the separate compile
- * define MAX17320_I_KNOW_THIS_BURNS_NVM=1 (build-system level, see
- * max17320.c) -- without that, max17320_commit_nvm() is a no-op regardless
- * of this flag. Even with both set, the code below still requires typing
- * a confirmation phrase over the UART console before it calls it. */
-#define MAX17320_ATTEMPT_NVM_COMMIT 0
-#define MAX17320_NVM_CONFIRM_PHRASE "BURN NVM"
-
-/* Live-watch globals: PSU control voltage and TSC1641 measurements.
- * volatile so the debugger (Live Watch) and UART code always see fresh values. */
+/* Live-watch global: PSU control voltage (TSC1641 measurements live in
+ * tsc1641.c). volatile so the debugger (Live Watch) and UART code always
+ * see fresh values. */
 volatile uint16_t psu_set_mv = 0;      /* last voltage written to DAC (PA5), mV */
-volatile int32_t tsc_current_ua = 0;   /* load current, µA (signed, bidirectional) */
-volatile uint32_t tsc_vload_mv = 0;    /* load voltage, mV */
-volatile uint32_t tsc_power_mw = 0;    /* DC power, mW */
-volatile int16_t tsc_vshunt_raw = 0;   /* raw shunt voltage reg, LSB 2.5 µV */
-volatile uint8_t tsc_online = 0;       /* 1 = last I2C exchange with TSC1641 OK */
 /* USER CODE END PV */
 
 #if defined ( __ICCARM__ ) /*!< IAR Compiler */
@@ -116,8 +97,6 @@ static void MX_I2C1_Init(void);
 void DAC_PA5_Init(void);
 void DAC_PA5_Write(uint16_t value);
 void DAC_PA5_Write_mV(uint16_t mv);
-uint8_t TSC1641_Init(void);
-void TSC1641_Update(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -128,35 +107,6 @@ int __io_putchar(int ch)
   HAL_UART_Transmit(&huart3, &c, 1, HAL_MAX_DELAY);
   return ch;
 }
-
-#if MAX17320_ATTEMPT_NVM_COMMIT
-/* Blocks until the operator types MAX17320_NVM_CONFIRM_PHRASE followed by
- * Enter over the USART3/VCP console, or until timeout_ms elapses with no
- * (or a non-matching) line. Returns 1 only on an exact match. */
-static int wait_for_confirm_phrase(uint32_t timeout_ms)
-{
-  char buf[32];
-  size_t len = 0;
-  uint32_t start = HAL_GetTick();
-
-  while ((HAL_GetTick() - start) < timeout_ms) {
-    uint8_t c;
-    if (HAL_UART_Receive(&huart3, &c, 1, 50) == HAL_OK) {
-      if (c == '\r' || c == '\n') {
-        if (len == 0) {
-          continue;
-        }
-        buf[len] = '\0';
-        return (strcmp(buf, MAX17320_NVM_CONFIRM_PHRASE) == 0);
-      }
-      if (len < sizeof(buf) - 1) {
-        buf[len++] = (char)c;
-      }
-    }
-  }
-  return 0; /* timed out: treated as "no" */
-}
-#endif
 
 /**
   * @brief  Init DAC channel 2 on PA5 (register-level, HAL DAC module not generated).
@@ -209,97 +159,6 @@ void DAC_PA5_Write_mV(uint16_t mv)
   DAC->DHR12R2 = ((uint32_t)mv * 4095U + 1650U) / 3300U;
 }
 
-/* ---------------------------------------------------------------------------
- * TSC1641 power monitor on STEVAL-DIGAFEV1 eval board (I2C1: PB6=SCL, PB9=SDA)
- * Address 0x40 = both address jumpers JP_A0/JP_A1 on GND (board default).
- * Onboard shunt R6 = 5 mOhm -> current LSB = 2.5 µV / 5 mOhm = 500 µA.
- * -------------------------------------------------------------------------*/
-#define TSC1641_ADDR          0x40
-#define TSC1641_REG_CONF      0x00
-#define TSC1641_REG_VSHUNT    0x01  /* LSB 2.5 µV, signed */
-#define TSC1641_REG_VLOAD     0x02  /* LSB 2 mV */
-#define TSC1641_REG_POWER     0x03  /* LSB 25 mW (datasheet map; see note) */
-#define TSC1641_REG_CURRENT   0x04  /* LSB = 2.5 µV / Rshunt, signed */
-#define TSC1641_REG_FLAGS     0x07
-#define TSC1641_REG_RSHUNT    0x08  /* LSB 10 µOhm */
-#define TSC1641_REG_DIE_ID    0xFF  /* reads 0x1000 */
-
-#define TSC1641_RSHUNT_VAL    500U  /* 5 mOhm / 10 µOhm */
-#define TSC1641_CURRENT_LSB_UA 500  /* µA per bit with 5 mOhm shunt */
-
-/* NOTE: register map tables (DS14338 Table 12, UM3202 Table 4) say
- * 0x03 = power, 0x04 = current, but the datasheet section headers and an
- * ST community report suggest they may be swapped on real silicon.
- * If tsc_current_ua and tsc_power_mw look exchanged, swap the two
- * register defines above. */
-
-/**
-  * @brief  Configure the TSC1641: continuous shunt+load conversion (1024 µs)
-  *         and program the shunt value so the chip computes current itself.
-  * @retval 1 = OK, 0 = chip did not answer on I2C
-  */
-uint8_t TSC1641_Init(void)
-{
-  if (xnx_i2c_write_reg16(TSC1641_ADDR, TSC1641_REG_CONF, 0x0037) != HAL_OK)
-  {
-    return 0;
-  }
-  if (xnx_i2c_write_reg16(TSC1641_ADDR, TSC1641_REG_RSHUNT,
-                          TSC1641_RSHUNT_VAL) != HAL_OK)
-  {
-    return 0;
-  }
-  return 1;
-}
-
-/**
-  * @brief  Read current, load voltage and power into the live-watch globals.
-  *         Call periodically from the main loop.
-  */
-void TSC1641_Update(void)
-{
-  uint16_t raw;
-  uint8_t ok = 1;
-
-  if (xnx_i2c_read_reg16(TSC1641_ADDR, TSC1641_REG_CURRENT, &raw) == HAL_OK)
-  {
-    tsc_current_ua = (int32_t)(int16_t)raw * TSC1641_CURRENT_LSB_UA;
-  }
-  else
-  {
-    ok = 0;
-  }
-
-  if (xnx_i2c_read_reg16(TSC1641_ADDR, TSC1641_REG_VLOAD, &raw) == HAL_OK)
-  {
-    tsc_vload_mv = (uint32_t)raw * 2U;
-  }
-  else
-  {
-    ok = 0;
-  }
-
-  if (xnx_i2c_read_reg16(TSC1641_ADDR, TSC1641_REG_POWER, &raw) == HAL_OK)
-  {
-    tsc_power_mw = (uint32_t)raw * 25U;
-  }
-  else
-  {
-    ok = 0;
-  }
-
-  if (xnx_i2c_read_reg16(TSC1641_ADDR, TSC1641_REG_VSHUNT, &raw) == HAL_OK)
-  {
-    tsc_vshunt_raw = (int16_t)raw;
-  }
-  else
-  {
-    ok = 0;
-  }
-
-  tsc_online = ok;
-}
-
 /* USER CODE END 0 */
 
 /**
@@ -339,117 +198,24 @@ int main(void)
   MX_USB_OTG_FS_PCD_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
-  HAL_Delay(200); /* let the MAX17320 finish its own power-up before polling it */
+  HAL_Delay(200); /* let bus devices finish their own power-up before polling */
   xnx_i2c_scan(&i2c_scan_result);
 
   printf("\r\n--- I2C1 bus scan (0x08-0x77) ---\r\n");
   if (i2c_scan_result.count == 0) {
     printf("No devices ACKed on the bus at all.\r\n");
-    printf("Check: GND common with the MAX17320 board? VDD present on it? SCL=PB6/SDA=PB9 wired correctly (not swapped)?\r\n");
+    printf("Check: common GND? VDD present? SCL=PB6/SDA=PB9 wired correctly (not swapped)?\r\n");
   } else {
     printf("%u device(s) found: ", i2c_scan_result.count);
     for (uint8_t i = 0; i < i2c_scan_result.count; i++) {
       printf("0x%02X ", i2c_scan_result.addr[i]);
     }
     printf("\r\n");
-    printf("Expected for MAX17320: 0x%02X (main regs) and 0x%02X (NV/shadow regs).\r\n",
-           MAX17320_ADDR7_MAIN, MAX17320_ADDR7_NV);
-  }
-
-  printf("\r\n--- MAX17320 provisioning ---\r\n");
-
-  if (max17320_probe(&hi2c1) != MAX17320_OK) {
-    printf("MAX17320: NOT responding at addr 0x%02X/0x%02X (check wiring/addresses)\r\n",
-           MAX17320_ADDR7_MAIN, MAX17320_ADDR7_NV);
-  } else {
-    printf("MAX17320: present. Backing up current NV/shadow registers...\r\n");
-
-    if (max17320_backup_config(&hi2c1, max17320_backup_buf, MAX17320_TARGET_CONFIG_COUNT) != MAX17320_OK) {
-      printf("Backup FAILED (I2C error) -- aborting, will not write anything.\r\n");
-    } else {
-      printf("Backup OK (%u registers read).\r\n", (unsigned)MAX17320_TARGET_CONFIG_COUNT);
-      for (size_t i = 0; i < MAX17320_TARGET_CONFIG_COUNT; i++) {
-        if (max17320_backup_buf[i] != max17320_target_config[i].value) {
-          printf("  0x%03X %-16s current=0x%04X target=0x%04X (will change)\r\n",
-                 max17320_target_config[i].addr, max17320_target_config[i].name,
-                 max17320_backup_buf[i], max17320_target_config[i].value);
-        }
-      }
-
-#if MAX17320_DO_WRITE_SHADOW_CONFIG
-      printf("Writing target config to shadow RAM (NVM untouched)...\r\n");
-      if (max17320_write_shadow_config(&hi2c1) != MAX17320_OK) {
-        printf("Shadow write FAILED (I2C error).\r\n");
-      } else {
-        size_t mismatch_idx[MAX17320_TARGET_CONFIG_COUNT];
-        size_t mismatch_count = 0;
-        max17320_status_t vst = max17320_verify_shadow_config(&hi2c1, mismatch_idx,
-                                                                MAX17320_TARGET_CONFIG_COUNT,
-                                                                &mismatch_count);
-        if (vst == MAX17320_OK) {
-          printf("Verify OK: all %u registers match target.\r\n", (unsigned)MAX17320_TARGET_CONFIG_COUNT);
-
-          uint8_t used = 0, remaining = 0;
-          if (max17320_read_remaining_nvm_updates(&hi2c1, &used, &remaining) == MAX17320_OK) {
-            printf("NVM config-memory writes used=%u remaining=%u (of 7 total lifetime).\r\n",
-                   used, remaining);
-          } else {
-            printf("Could not read remaining NVM update count (I2C error).\r\n");
-          }
-
-#if MAX17320_ATTEMPT_NVM_COMMIT
-          printf("\r\n*** About to COMMIT to NVM. This is IRREVERSIBLE and burns one of\r\n");
-          printf("*** the %u remaining lifetime writes. Backup + diff was printed above.\r\n", remaining);
-          printf("Type exactly '%s' and press Enter within 30s to proceed, anything else aborts:\r\n",
-                 MAX17320_NVM_CONFIRM_PHRASE);
-
-          if (wait_for_confirm_phrase(30000)) {
-            printf("Confirmed. Committing to NVM...\r\n");
-            max17320_status_t cst = max17320_commit_nvm(&hi2c1, MAX17320_NVM_CONFIRM_TOKEN);
-            switch (cst) {
-              case MAX17320_OK:              printf("NVM commit OK.\r\n"); break;
-              case MAX17320_ERR_NVM_ERROR:    printf("NVM commit FAILED: CommStat.NVError set.\r\n"); break;
-              case MAX17320_ERR_NOT_IMPLEMENTED:
-                printf("NVM commit not enabled: build without MAX17320_I_KNOW_THIS_BURNS_NVM=1.\r\n");
-                break;
-              default: printf("NVM commit FAILED, status=%d.\r\n", (int)cst); break;
-            }
-
-            {
-              uint8_t used2 = 0, remaining2 = 0;
-              if (max17320_read_remaining_nvm_updates(&hi2c1, &used2, &remaining2) == MAX17320_OK) {
-                printf("Post-attempt: NVM writes used=%u remaining=%u (was used=%u remaining=%u before).\r\n",
-                       used2, remaining2, used, remaining);
-              } else {
-                printf("Post-attempt: could not read remaining NVM update count (I2C error).\r\n");
-              }
-            }
-          } else {
-            printf("Not confirmed (timeout or mismatch) -- NVM left untouched.\r\n");
-          }
-#else
-          printf("MAX17320_ATTEMPT_NVM_COMMIT=0: not attempting NVM commit.\r\n");
-#endif
-        } else {
-          printf("Verify MISMATCH on %u register(s):\r\n", (unsigned)mismatch_count);
-          for (size_t k = 0; k < mismatch_count && k < MAX17320_TARGET_CONFIG_COUNT; k++) {
-            size_t i = mismatch_idx[k];
-            printf("  0x%03X %-16s expected=0x%04X\r\n",
-                   max17320_target_config[i].addr, max17320_target_config[i].name,
-                   max17320_target_config[i].value);
-          }
-          printf("Not attempting NVM commit: shadow config does not verify clean.\r\n");
-        }
-      }
-#else
-      printf("MAX17320_DO_WRITE_SHADOW_CONFIG=0: dry-run only, nothing written.\r\n");
-#endif
-    }
   }
 
   DAC_PA5_Init();
   DAC_PA5_Write_mV(0);
-  TSC1641_Init();
+  TSC1641_Init(&hi2c1);
   /* USER CODE END 2 */
 
   /* Infinite loop */

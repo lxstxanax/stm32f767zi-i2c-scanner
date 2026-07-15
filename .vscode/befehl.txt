@@ -45,3 +45,11 @@ protokollieren für Sylvia
      Hauptschleife alle 500 ms aktualisiert, per Live Watch beobachtbar
    - Projekt kompiliert; Stand auf GitHub gesichert
 
+6) Code aufgeräumt: TSC1641 als eigene Bibliothek — ca. 2 Std.
+   - TSC1641-Code aus main.c in eigene Dateien ausgelagert
+     (Core/Inc/tsc1641.h + Core/Src/tsc1641.c), main.c deutlich kürzer
+   - MAX17320-Code (aus anderem Projekt) aus main.c entfernt,
+     Dateien bleiben aber im Projekt erhalten
+   - Neue Quelldatei ins Build-System (CMake) eingetragen
+   - Projekt kompiliert fehlerfrei, Stand auf GitHub gesichert
+

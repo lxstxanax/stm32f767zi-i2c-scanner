@@ -25,6 +25,7 @@ set(MX_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/sysmem.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/syscalls.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/max17320.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/tsc1641.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../startup_stm32f767xx.s
 )
 
