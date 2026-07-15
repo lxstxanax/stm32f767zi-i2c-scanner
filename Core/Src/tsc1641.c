@@ -7,7 +7,7 @@
 
 volatile int32_t tsc_current_ua = 0;
 volatile int32_t tsc_vload_mv = 0;
-volatile uint32_t tsc_power_mw = 0;
+volatile int32_t tsc_power_mw = 0;
 volatile int16_t tsc_vshunt_raw = 0;
 volatile uint8_t tsc_online = 0;
 
@@ -65,7 +65,7 @@ void TSC1641_Update(void)
   if (xnx_i2c_read_reg16_ex(tsc_bus, TSC1641_ADDR, TSC1641_REG_POWER,
                             &raw) == HAL_OK)
   {
-    tsc_power_mw = (uint32_t)raw * 25U;
+    tsc_power_mw = (int32_t)(int16_t)raw * 25;
   }
   else
   {

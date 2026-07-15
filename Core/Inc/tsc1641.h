@@ -41,10 +41,12 @@
  * register defines above. */
 
 /* ---- Live-watch globals (updated by TSC1641_Update) ------------------ */
-extern volatile int32_t tsc_current_ua;   /* load current, µA (signed) */
+extern volatile int32_t 
+tsc_current_ua;   /* load current, µA (signed) */
 extern volatile int32_t tsc_vload_mv;     /* load voltage, mV (signed: a floating
                                              VLOAD input can read slightly < 0) */
-extern volatile uint32_t tsc_power_mw;    /* DC power, mW */
+extern volatile int32_t tsc_power_mw;     /* DC power, mW (signed; garbage while
+                                             the VLOAD reading itself is garbage) */
 extern volatile int16_t tsc_vshunt_raw;   /* raw shunt voltage reg, LSB 2.5 µV */
 extern volatile uint8_t tsc_online;       /* 1 = last I2C exchange OK */
 
