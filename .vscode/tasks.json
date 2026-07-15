@@ -115,13 +115,13 @@
                 "clear": false
             },
             "problemMatcher": [],
-            "dependsOn": ["Build", "BuildSize"],
+            "dependsOn": ["Clean & Rebuild", "BuildSize"],
             "dependsOrder": "sequence",
             "options": {
                 "statusbar": {
                     "hide": false,
                     "color": "#13e6e6",
-                    "detail": "Build, show size, flash and reset",
+                    "detail": "Clean rebuild, show size, flash and reset",
                     "icon": {
                         "id": "play"
                     }
