@@ -54,5 +54,24 @@ protokollieren für Sylvia
    - Projekt kompiliert fehlerfrei, Stand auf GitHub gesichert
 
    припаять резистор на 5 милиом, датчик температуры
-   
+
+
+=====================================================================
+15./16.07.2026 — Arbeitsprotokoll (ca. 8 Stunden gesamt)
+=====================================================================
+
+1) TSC1641 in Betrieb genommen, Messwerte ausgewertet — ca. 3 Std.
+   - Sensor am I2C erkannt (0x40), Strommessung funktioniert
+   - Serielle Ausgabe auf Volt/Ampere umgestellt, Register vorzeichen-
+     richtig gelesen (VLOAD/Power waren als unsigned falsch dargestellt)
+   - Erkenntnis: schwankende VLOAD-Werte = offener Messeingang bzw.
+     Netzteil in Strombegrenzung (CC); Strommessung davon unberührt
+   - Ausgabe auf Strom reduziert (Vload/Leistung vorerst entfernt)
+
+2) Umzug auf Ubuntu vorbereitet (Laptop wird neu aufgesetzt) — ca. 5 Std.
+   - Projektstand vollständig auf GitHub gesichert, Arbeitskopie sauber
+   - Ubuntu-24.04.4-Installationsstick geprüft (498 Prüfsummen OK)
+   - Zweiten USB-Stick repariert (Partition 32 -> 58,6 GB, exFAT)
+   - Alle Benutzerprofile, Laufwerk D: und eigene Daten auf den
+     Stick gesichert (14,5 GB, Kopierprotokoll liegt bei)
 
