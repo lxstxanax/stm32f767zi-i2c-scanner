@@ -1,0 +1,47 @@
+am welchen Tag wie viel stunden was wie lange!
+protokollieren für Sylvia
+
+=====================================================================
+15.07.2026 — Arbeitsprotokoll (ca. 14 Stunden gesamt)
+=====================================================================
+
+1) DAC (Digital-Analog-Wandler) auf Pin PA5 eingerichtet — ca. 6 Std.
+   - Referenzhandbuch STM32F767 gelesen, DAC-Kapitel verstanden
+   - Pinbelegung geprüft: PA5 = DAC-Ausgang Kanal 2, am Stecker
+     CN7 Pin 10 (D13); Alternative PA4 = CN7 Pin 17 (D24)
+   - Initialisierung direkt über Register geschrieben (HAL-DAC-Modul
+     war im Projekt nicht generiert)
+   - Funktion DAC_PA5_Write_mV(): Spannung in Millivolt vorgeben
+     (z.B. 1500 = 1,5 V), wird zur Steuerung eines Netzteils benutzt
+   - Mit Multimeter am Pin nachgemessen
+
+2) Störungen am DAC-Ausgang untersucht — ca. 2 Std.
+   - Ausgang war unruhig; Ursache: Masseführung / offene Leitung
+   - Geklärt: Board hat keinen separaten Analog-GND, normaler GND
+     reicht (CN7 Pin 8, direkt neben PA5); RC-Filter empfohlen
+
+3) Build-/Flash-Umgebung in VS Code repariert — ca. 3 Std.
+   - Fehler „arm-none-eabi nicht gefunden" beim Bauen über Tasks
+   - Ursache: Werkzeuge (Compiler, Programmer) nicht im PATH
+   - tasks.json angepasst: PATH wird jetzt zentral aus der Einstellung
+     stm32.cltPath aufgebaut; STM32CubeMX-Pfad ergänzt
+   - Bauen, Flashen, Debuggen über die Buttons geprüft
+
+4) I2C-Bibliothek erweitert (für TSC1641-Eval-Board) — ca. 3 Std.
+   - Funktionen zum Lesen/Schreiben von 16-Bit-Registern ergänzt
+     (High-Byte zuerst, wie beim TSC1641 üblich), dazu 8-Bit-Varianten
+   - Aufruf einfach: xnx_i2c_write_reg16(Adresse, Register, Wert)
+   - Projekt kompiliert fehlerfrei
+
+5) TSC1641-Strommessung eingebunden (STEVAL-DIGAFEV1) — ca. 5 Std.
+   - Datenblatt (DS14338) und Board-Handbuch (UM3202) durchgearbeitet:
+     Versorgung 2,7–3,6 V (läuft am 3,3 V des Nucleo), Pull-ups 4,7 kOhm
+     schon auf dem Eval-Board, I2C-Adresse 0x40 (Jumper A0/A1 auf GND),
+     Shunt 5 mOhm auf der Platine
+   - Initialisierung: Dauermessung Strom+Spannung, Shunt-Wert ins
+     Rshunt-Register programmiert (Strom-LSB = 500 µA)
+   - Globale Variablen für Live-Debug angelegt: Sollspannung ans
+     Netzteil, gemessener Strom, Lastspannung, Leistung — in der
+     Hauptschleife alle 500 ms aktualisiert, per Live Watch beobachtbar
+   - Projekt kompiliert; Stand auf GitHub gesichert
+

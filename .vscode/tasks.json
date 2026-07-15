@@ -1,5 +1,10 @@
 {
     "version": "2.0.0",
+    "options": {
+        "env": {
+            "PATH": "${config:stm32.cltPath}/GNU-tools-for-STM32/bin;${config:stm32.cltPath}/STM32CubeProgrammer/bin;${config:stm32.cltPath}/CMake/bin;${config:stm32.cltPath}/Ninja/bin;C:\\Users\\Vlad\\AppData\\Local\\Programs\\STM32CubeMX;${env:PATH}"
+        }
+    },
     "tasks": [
         {
             "label": "Build",

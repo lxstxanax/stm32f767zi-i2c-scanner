@@ -62,6 +62,15 @@ static uint16_t max17320_backup_buf[MAX17320_TARGET_CONFIG_COUNT];
  * a confirmation phrase over the UART console before it calls it. */
 #define MAX17320_ATTEMPT_NVM_COMMIT 0
 #define MAX17320_NVM_CONFIRM_PHRASE "BURN NVM"
+
+/* Live-watch globals: PSU control voltage and TSC1641 measurements.
+ * volatile so the debugger (Live Watch) and UART code always see fresh values. */
+volatile uint16_t psu_set_mv = 0;      /* last voltage written to DAC (PA5), mV */
+volatile int32_t tsc_current_ua = 0;   /* load current, µA (signed, bidirectional) */
+volatile uint32_t tsc_vload_mv = 0;    /* load voltage, mV */
+volatile uint32_t tsc_power_mw = 0;    /* DC power, mW */
+volatile int16_t tsc_vshunt_raw = 0;   /* raw shunt voltage reg, LSB 2.5 µV */
+volatile uint8_t tsc_online = 0;       /* 1 = last I2C exchange with TSC1641 OK */
 /* USER CODE END PV */
 
 #if defined ( __ICCARM__ ) /*!< IAR Compiler */
@@ -104,7 +113,11 @@ static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
-
+void DAC_PA5_Init(void);
+void DAC_PA5_Write(uint16_t value);
+void DAC_PA5_Write_mV(uint16_t mv);
+uint8_t TSC1641_Init(void);
+void TSC1641_Update(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -144,6 +157,149 @@ static int wait_for_confirm_phrase(uint32_t timeout_ms)
   return 0; /* timed out: treated as "no" */
 }
 #endif
+
+/**
+  * @brief  Init DAC channel 2 on PA5 (register-level, HAL DAC module not generated).
+  *         Output buffer stays enabled (BOFF2 = 0) so the pin can drive a
+  *         high-impedance control input directly.
+  */
+void DAC_PA5_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  /* PA5 in analog mode (GPIOA clock already enabled in MX_GPIO_Init) */
+  GPIO_InitStruct.Pin = GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  __HAL_RCC_DAC_CLK_ENABLE();
+
+  DAC->DHR12R2 = 0;          /* start at 0 V */
+  DAC->CR |= DAC_CR_EN2;     /* enable channel 2 (PA5) */
+}
+
+/**
+  * @brief  Set DAC output voltage on PA5.
+  * @param  value: 0..4095 -> 0..3.3 V (VDDA). Values above 4095 are clamped.
+  *         Buffered output saturates ~0.2 V from the rails.
+  */
+void DAC_PA5_Write(uint16_t value)
+{
+  if (value > 4095U)
+  {
+    value = 4095U;
+  }
+  DAC->DHR12R2 = value;
+}
+
+/**
+  * @brief  Set DAC output voltage on PA5 in millivolts.
+  * @param  mv: 0..3300 -> 0..3.3 V (e.g. 1500 = 1.5 V). Clamped to 3300.
+  *         Scale assumes VDDA = 3.30 V; buffered output saturates ~0.2 V
+  *         from the rails, so the usable range is roughly 200..3100 mV.
+  */
+void DAC_PA5_Write_mV(uint16_t mv)
+{
+  if (mv > 3300U)
+  {
+    mv = 3300U;
+  }
+  psu_set_mv = mv;
+  DAC->DHR12R2 = ((uint32_t)mv * 4095U + 1650U) / 3300U;
+}
+
+/* ---------------------------------------------------------------------------
+ * TSC1641 power monitor on STEVAL-DIGAFEV1 eval board (I2C1: PB6=SCL, PB9=SDA)
+ * Address 0x40 = both address jumpers JP_A0/JP_A1 on GND (board default).
+ * Onboard shunt R6 = 5 mOhm -> current LSB = 2.5 µV / 5 mOhm = 500 µA.
+ * -------------------------------------------------------------------------*/
+#define TSC1641_ADDR          0x40
+#define TSC1641_REG_CONF      0x00
+#define TSC1641_REG_VSHUNT    0x01  /* LSB 2.5 µV, signed */
+#define TSC1641_REG_VLOAD     0x02  /* LSB 2 mV */
+#define TSC1641_REG_POWER     0x03  /* LSB 25 mW (datasheet map; see note) */
+#define TSC1641_REG_CURRENT   0x04  /* LSB = 2.5 µV / Rshunt, signed */
+#define TSC1641_REG_FLAGS     0x07
+#define TSC1641_REG_RSHUNT    0x08  /* LSB 10 µOhm */
+#define TSC1641_REG_DIE_ID    0xFF  /* reads 0x1000 */
+
+#define TSC1641_RSHUNT_VAL    500U  /* 5 mOhm / 10 µOhm */
+#define TSC1641_CURRENT_LSB_UA 500  /* µA per bit with 5 mOhm shunt */
+
+/* NOTE: register map tables (DS14338 Table 12, UM3202 Table 4) say
+ * 0x03 = power, 0x04 = current, but the datasheet section headers and an
+ * ST community report suggest they may be swapped on real silicon.
+ * If tsc_current_ua and tsc_power_mw look exchanged, swap the two
+ * register defines above. */
+
+/**
+  * @brief  Configure the TSC1641: continuous shunt+load conversion (1024 µs)
+  *         and program the shunt value so the chip computes current itself.
+  * @retval 1 = OK, 0 = chip did not answer on I2C
+  */
+uint8_t TSC1641_Init(void)
+{
+  if (xnx_i2c_write_reg16(TSC1641_ADDR, TSC1641_REG_CONF, 0x0037) != HAL_OK)
+  {
+    return 0;
+  }
+  if (xnx_i2c_write_reg16(TSC1641_ADDR, TSC1641_REG_RSHUNT,
+                          TSC1641_RSHUNT_VAL) != HAL_OK)
+  {
+    return 0;
+  }
+  return 1;
+}
+
+/**
+  * @brief  Read current, load voltage and power into the live-watch globals.
+  *         Call periodically from the main loop.
+  */
+void TSC1641_Update(void)
+{
+  uint16_t raw;
+  uint8_t ok = 1;
+
+  if (xnx_i2c_read_reg16(TSC1641_ADDR, TSC1641_REG_CURRENT, &raw) == HAL_OK)
+  {
+    tsc_current_ua = (int32_t)(int16_t)raw * TSC1641_CURRENT_LSB_UA;
+  }
+  else
+  {
+    ok = 0;
+  }
+
+  if (xnx_i2c_read_reg16(TSC1641_ADDR, TSC1641_REG_VLOAD, &raw) == HAL_OK)
+  {
+    tsc_vload_mv = (uint32_t)raw * 2U;
+  }
+  else
+  {
+    ok = 0;
+  }
+
+  if (xnx_i2c_read_reg16(TSC1641_ADDR, TSC1641_REG_POWER, &raw) == HAL_OK)
+  {
+    tsc_power_mw = (uint32_t)raw * 25U;
+  }
+  else
+  {
+    ok = 0;
+  }
+
+  if (xnx_i2c_read_reg16(TSC1641_ADDR, TSC1641_REG_VSHUNT, &raw) == HAL_OK)
+  {
+    tsc_vshunt_raw = (int16_t)raw;
+  }
+  else
+  {
+    ok = 0;
+  }
+
+  tsc_online = ok;
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -290,6 +446,10 @@ int main(void)
 #endif
     }
   }
+
+  DAC_PA5_Init();
+  DAC_PA5_Write_mV(0);
+  TSC1641_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -301,6 +461,14 @@ int main(void)
     /* USER CODE BEGIN 3 */
     HAL_GPIO_TogglePin(GPIOB, LD1_Pin | LD2_Pin | LD3_Pin);
     blink_count++;
+    TSC1641_Update();
+    if (tsc_online) {
+      printf("PSU set=%u mV | I=%ld uA | Vload=%lu mV | P=%lu mW\r\n",
+             psu_set_mv, (long)tsc_current_ua,
+             (unsigned long)tsc_vload_mv, (unsigned long)tsc_power_mw);
+    } else {
+      printf("PSU set=%u mV | TSC1641: no ACK on I2C (addr 0x40)\r\n", psu_set_mv);
+    }
     HAL_Delay(500);
   }
   /* USER CODE END 3 */
