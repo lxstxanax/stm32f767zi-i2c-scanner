@@ -53,3 +53,6 @@ protokollieren für Sylvia
    - Neue Quelldatei ins Build-System (CMake) eingetragen
    - Projekt kompiliert fehlerfrei, Stand auf GitHub gesichert
 
+   припаять резистор на 5 милиом, датчик температуры
+   
+
