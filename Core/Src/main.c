@@ -22,7 +22,6 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#define XNX_I2C_BUS (&hi2c1)
 #include "xnx_i2c.h"
 #include "tsc1641.h"
 #include <stdio.h>
@@ -47,11 +46,7 @@
 /* USER CODE BEGIN PV */
 xnx_i2c_scan_t i2c_scan_result;
 volatile uint32_t blink_count = 0;
-
-/* Live-watch global: PSU control voltage (TSC1641 measurements live in
- * tsc1641.c). volatile so the debugger (Live Watch) and UART code always
- * see fresh values. */
-volatile uint16_t psu_set_mv = 0;      /* last voltage written to DAC (PA5), mV */
+volatile float psu_set_v = 0;   /* last voltage written to the DAC on PA5 */
 /* USER CODE END PV */
 
 #if defined ( __ICCARM__ ) /*!< IAR Compiler */
@@ -95,8 +90,7 @@ static void MX_USB_OTG_FS_PCD_Init(void);
 static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 void DAC_PA5_Init(void);
-void DAC_PA5_Write(uint16_t value);
-void DAC_PA5_Write_mV(uint16_t mv);
+void DAC_PA5_Set(float volts);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -108,16 +102,12 @@ int __io_putchar(int ch)
   return ch;
 }
 
-/**
-  * @brief  Init DAC channel 2 on PA5 (register-level, HAL DAC module not generated).
-  *         Output buffer stays enabled (BOFF2 = 0) so the pin can drive a
-  *         high-impedance control input directly.
-  */
+/* Set up DAC channel 2 on PA5 by hand (the HAL DAC module isn't generated).
+ * The output buffer stays on, so the pin can drive a control input directly. */
 void DAC_PA5_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-  /* PA5 in analog mode (GPIOA clock already enabled in MX_GPIO_Init) */
   GPIO_InitStruct.Pin = GPIO_PIN_5;
   GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -126,37 +116,19 @@ void DAC_PA5_Init(void)
   __HAL_RCC_DAC_CLK_ENABLE();
 
   DAC->DHR12R2 = 0;          /* start at 0 V */
-  DAC->CR |= DAC_CR_EN2;     /* enable channel 2 (PA5) */
+  DAC->CR |= DAC_CR_EN2;     /* enable channel 2 = PA5 */
 }
 
-/**
-  * @brief  Set DAC output voltage on PA5.
-  * @param  value: 0..4095 -> 0..3.3 V (VDDA). Values above 4095 are clamped.
-  *         Buffered output saturates ~0.2 V from the rails.
-  */
-void DAC_PA5_Write(uint16_t value)
+/* Set the PA5 output voltage, 0..3.3 V (assumes VDDA = 3.3 V).
+ * The buffered output can't reach closer than ~0.2 V to the rails. */
+void DAC_PA5_Set(float volts)
 {
-  if (value > 4095U)
-  {
-    value = 4095U;
-  }
-  DAC->DHR12R2 = value;
-}
-
-/**
-  * @brief  Set DAC output voltage on PA5 in millivolts.
-  * @param  mv: 0..3300 -> 0..3.3 V (e.g. 1500 = 1.5 V). Clamped to 3300.
-  *         Scale assumes VDDA = 3.30 V; buffered output saturates ~0.2 V
-  *         from the rails, so the usable range is roughly 200..3100 mV.
-  */
-void DAC_PA5_Write_mV(uint16_t mv)
-{
-  if (mv > 3300U)
-  {
-    mv = 3300U;
-  }
-  psu_set_mv = mv;
-  DAC->DHR12R2 = ((uint32_t)mv * 4095U + 1650U) / 3300U;
+  if (volts < 0)
+    volts = 0;
+  if (volts > 3.3f)
+    volts = 3.3f;
+  psu_set_v = volts;
+  DAC->DHR12R2 = (uint16_t)(volts / 3.3f * 4095.0f + 0.5f);
 }
 
 /* USER CODE END 0 */
@@ -199,7 +171,7 @@ int main(void)
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   HAL_Delay(200); /* let bus devices finish their own power-up before polling */
-  xnx_i2c_scan(&i2c_scan_result);
+  xnx_i2c_scan(&hi2c1, &i2c_scan_result);
 
   printf("\r\n--- I2C1 bus scan (0x08-0x77) ---\r\n");
   if (i2c_scan_result.count == 0) {
@@ -214,7 +186,7 @@ int main(void)
   }
 
   DAC_PA5_Init();
-  DAC_PA5_Write_mV(0);
+  DAC_PA5_Set(0);
   TSC1641_Init(&hi2c1);
   /* USER CODE END 2 */
 
@@ -229,15 +201,9 @@ int main(void)
     blink_count++;
     TSC1641_Update();
     if (tsc_online) {
-      /* amps with integer math: I LSB 0.0005 A */
-      long i_ua = (long)tsc_current_ua;
-      unsigned long i_abs = (i_ua < 0) ? (unsigned long)(-i_ua) : (unsigned long)i_ua;
-      printf("PSU set=%u.%03u V | I=%s%lu.%04lu A\r\n",
-             psu_set_mv / 1000U, psu_set_mv % 1000U,
-             (i_ua < 0) ? "-" : "", i_abs / 1000000UL, (i_abs % 1000000UL) / 100UL);
+      printf("PSU set=%.3f V | I=%.4f A\r\n", psu_set_v, tsc_current_a);
     } else {
-      printf("PSU set=%u.%03u V | TSC1641: no ACK on I2C (addr 0x40)\r\n",
-             psu_set_mv / 1000U, psu_set_mv % 1000U);
+      printf("PSU set=%.3f V | TSC1641: no ACK on I2C (addr 0x40)\r\n", psu_set_v);
     }
     HAL_Delay(500);
   }

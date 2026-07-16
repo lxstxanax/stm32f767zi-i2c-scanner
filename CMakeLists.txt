@@ -44,8 +44,12 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user sources here
+    Core/Src/xnx_i2c.c
+    Core/Src/tsc1641.c
 )
+
+# printf with float support (newlib-nano leaves it out by default)
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -u _printf_float)
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
