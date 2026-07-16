@@ -1,15 +1,10 @@
 {
     "version": "2.0.0",
-    "options": {
-        "env": {
-            "PATH": "${config:stm32.cltPath}/GNU-tools-for-STM32/bin;${config:stm32.cltPath}/STM32CubeProgrammer/bin;${config:stm32.cltPath}/CMake/bin;${config:stm32.cltPath}/Ninja/bin;C:\\Users\\Vlad\\AppData\\Local\\Programs\\STM32CubeMX;${env:PATH}"
-        }
-    },
     "tasks": [
         {
             "label": "Build",
-            "type": "cmake",
-            "command": "build",
+            "type": "shell",
+            "command": "cmake --preset Debug && cmake --build --preset Debug",
             "problemMatcher": "$gcc",
             "group": {
                 "kind": "build",
@@ -24,9 +19,9 @@
         },
         {
             "label": "Clean",
-            "type": "cmake",
-            "command": "clean",
-            "problemMatcher": "$gcc",
+            "type": "shell",
+            "command": "cmake --build --preset Debug --target clean",
+            "problemMatcher": [],
             "group": "build",
             "options": {
                 "statusbar": {
@@ -37,8 +32,8 @@
         },
         {
             "label": "Clean & Rebuild",
-            "type": "cmake",
-            "command": "cleanRebuild",
+            "type": "shell",
+            "command": "cmake --preset Debug && cmake --build --preset Debug --clean-first",
             "problemMatcher": "$gcc",
             "group": "build",
             "options": {
@@ -52,7 +47,7 @@
             "label": "BuildSize",
             "type": "shell",
             "command": "arm-none-eabi-size",
-            "args": ["./build/Debug/${workspaceFolderBasename}.elf"],
+            "args": ["./build/Debug/F767_i2c.elf"],
             "group": "build",
             "dependsOn": ["Build"],
             "dependsOrder": "sequence",
@@ -70,11 +65,9 @@
         {
             "label": "OpenConfiguration",
             "type": "shell",
-            "command": "STM32CubeMX",
-            "args": ["./${workspaceFolderBasename}.ioc"],
+            "command": "stm32cubemx",
+            "args": ["./F767_i2c.ioc"],
             "group": "build",
-            "dependsOn": [],
-            "dependsOrder": "sequence",
             "problemMatcher": [],
             "presentation": {
                 "reveal": "always"
@@ -92,15 +85,11 @@
         {
             "label": "Flash STM32",
             "type": "shell",
-            "command": "STM32_Programmer_CLI",
+            "command": "openocd",
             "args": [
-                "-c",
-                "port=SWD",
-                "-w",
-                "./build/Debug/${workspaceFolderBasename}.elf",
-                "0x8000000",
-                "-hardRst",
-                "--start"
+                "-f", "interface/stlink.cfg",
+                "-f", "target/stm32f7x.cfg",
+                "-c", "program build/Debug/F767_i2c.elf verify reset exit"
             ],
             "group": {
                 "kind": "build",
@@ -131,8 +120,12 @@
         {
             "label": "Reset",
             "type": "shell",
-            "command": "STM32_Programmer_CLI",
-            "args": ["-c", "port=SWD", "-hardRst", "--start"],
+            "command": "openocd",
+            "args": [
+                "-f", "interface/stlink.cfg",
+                "-f", "target/stm32f7x.cfg",
+                "-c", "init; reset run; exit"
+            ],
             "group": "build",
             "presentation": {
                 "echo": true,
@@ -143,8 +136,6 @@
                 "clear": false
             },
             "problemMatcher": [],
-            "dependsOn": [],
-            "dependsOrder": "sequence",
             "options": {
                 "statusbar": {
                     "hide": false,
@@ -159,15 +150,11 @@
         {
             "label": "Erase & Flash STM32",
             "type": "shell",
-            "command": "STM32_Programmer_CLI",
+            "command": "openocd",
             "args": [
-                "-c",
-                "port=SWD",
-                "-w",
-                "./build/Debug/${workspaceFolderBasename}.elf",
-                "0x8000000",
-                "-hardRst",
-                "--start"
+                "-f", "interface/stlink.cfg",
+                "-f", "target/stm32f7x.cfg",
+                "-c", "program build/Debug/F767_i2c.elf verify reset exit"
             ],
             "group": "build",
             "presentation": {
@@ -195,16 +182,8 @@
         {
             "label": "Full CHIP Erase",
             "type": "shell",
-            "command": "STM32_Programmer_CLI",
-            "args": [
-                "-c",
-                "port=SWD",
-                "INDEX=0",
-                "mode=UR",
-                "-e",
-                "ALL",
-                "-hardRst"
-            ],
+            "command": "st-flash",
+            "args": ["erase"],
             "group": "build",
             "presentation": {
                 "echo": true,
@@ -215,8 +194,6 @@
                 "clear": false
             },
             "problemMatcher": [],
-            "dependsOn": [],
-            "dependsOrder": "sequence",
             "options": {
                 "statusbar": {
                     "hide": false,
@@ -246,18 +223,14 @@
         {
             "label": "Serial Monitor (ST-Link VCP)",
             "type": "shell",
-            "command": "powershell",
-            "args": [
-                "-NoProfile",
-                "-ExecutionPolicy", "Bypass",
-                "-File", "${workspaceFolder}/tools/serial_monitor.ps1"
-            ],
+            "command": "bash",
+            "args": ["${workspaceFolder}/tools/serial_monitor.sh"],
             "isBackground": true,
             "problemMatcher": [],
             "presentation": {
                 "echo": true,
                 "reveal": "always",
-                "focus": false,
+                "focus": true,
                 "panel": "dedicated",
                 "showReuseMessage": true,
                 "clear": true
@@ -266,7 +239,7 @@
                 "statusbar": {
                     "hide": false,
                     "color": "#9b59b6",
-                    "detail": "Open a live 115200-baud serial view of the ST-Link VCP (auto-detects the COM port)",
+                    "detail": "Open a live 115200-baud serial view of the ST-Link VCP (auto-detects the port)",
                     "icon": {
                         "id": "output"
                     }

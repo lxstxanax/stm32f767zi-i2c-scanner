@@ -1,13 +1,14 @@
-﻿{
-    // === CHANGE THIS on each machine ===
+{
+    // Windows only: path to STM32CubeCLT (used by the Windows tasks/launch config)
     "stm32.cltPath": "C:/ST/STM32CubeCLT_1.21.0",
 
+    "cmake.preferredGenerators": [
+        "Ninja"
+    ],
+    "cmake.useCMakePresets": "always",
     "cmake.cmakePath": "cube-cmake",
     "cmake.configureArgs": [
         "-DCMAKE_COMMAND=cube-cmake"
-    ],
-    "cmake.preferredGenerators": [
-        "Ninja"
     ],
     "stm32cube-ide-clangd.path": "cube",
     "stm32cube-ide-clangd.arguments": [
@@ -16,4 +17,3 @@
         "--query-driver=${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-g++*"
     ]
 }
-
