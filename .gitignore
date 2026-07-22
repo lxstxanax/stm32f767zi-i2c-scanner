@@ -25,3 +25,10 @@ desktop.ini
 
 # STM32 VS Code Extension (machine-specific)
 .settings/
+
+# Python virtual environment of the dashboard (recreate with install.sh)
+tools/sensor_dashboard/.venv/
+__pycache__/
+
+# Measurement logs recorded by the dashboard
+tools/sensor_dashboard/logs/

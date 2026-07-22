@@ -247,6 +247,31 @@
             }
         },
         {
+            "label": "Sensor Dashboard",
+            "type": "shell",
+            "command": "${workspaceFolder}/tools/sensor_dashboard/run.sh",
+            "isBackground": true,
+            "problemMatcher": [],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "dedicated",
+                "showReuseMessage": true,
+                "clear": true
+            },
+            "options": {
+                "statusbar": {
+                    "hide": false,
+                    "color": "#f39c12",
+                    "detail": "Open the live sensor dashboard (close the Serial Monitor first - the port is exclusive)",
+                    "icon": {
+                        "id": "graph"
+                    }
+                }
+            }
+        },
+        {
             "label": "Post Debug Task",
             "type": "shell",
             "command": "echo 'Debug session ended.'",

@@ -46,6 +46,9 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/xnx_i2c.c
     Core/Src/tsc1641.c
+    Core/Src/ina228.c
+    Core/Src/mpu6050.c
+    Core/Src/mlx90614.c
 )
 
 # printf with float support (newlib-nano leaves it out by default)

@@ -24,6 +24,9 @@
 /* USER CODE BEGIN Includes */
 #include "xnx_i2c.h"
 #include "tsc1641.h"
+#include "ina228.h"
+#include "mpu6050.h"
+#include "mlx90614.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -47,6 +50,44 @@
 xnx_i2c_scan_t i2c_scan_result;
 volatile uint32_t blink_count = 0;
 volatile float psu_set_v = 0;   /* last voltage written to the DAC on PA5 */
+
+/*
+ * Four sensors share the single I2C1 bus (SCL = PB6, SDA = PB9):
+ *   MPU6050   0x68  accelerometer and gyroscope
+ *   MLX90614  0x5A  contact-free infrared thermometer
+ *   TSC1641   0x40..0x43 (jumpers)  16-bit current and voltage monitor
+ *   INA228    0x40..0x4F (jumpers)  20-bit current and voltage monitor
+ *
+ * Both power monitors measure the same load current: their shunts sit in
+ * series in the same wire, which is what makes it possible to compare the
+ * two against each other.
+ */
+mpu6050_t mpu;
+mlx90614_t mlx;
+tsc1641_t tsc;
+ina228_t ina;
+
+/* Newest reading of each sensor. These are global on purpose: the debugger
+ * (Live Watch) can then show the measurements while the program runs. */
+mpu6050_data_t mpu_data;
+mlx90614_data_t mlx_data;
+tsc1641_data_t tsc_data;
+ina228_data_t ina_data;
+
+/* Result of the start-up initialisation, kept so it can be reported again
+ * later - a monitor that connects halfway would otherwise miss it. */
+mpu6050_status_t mpu_st;
+mlx90614_status_t mlx_st;
+tsc1641_status_t tsc_st;
+ina228_status_t ina_st;
+
+/* A sensor is only polled if it answered at start-up. Skipping the silent
+ * ones keeps the loop from stalling on I2C timeouts, so the rest of the
+ * system keeps working when one sensor is unplugged. */
+uint8_t mpu_ok = 0;
+uint8_t mlx_ok = 0;
+uint8_t tsc_ok = 0;
+uint8_t ina_ok = 0;
 /* USER CODE END PV */
 
 #if defined ( __ICCARM__ ) /*!< IAR Compiler */
@@ -91,6 +132,7 @@ static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 void DAC_PA5_Init(void);
 void DAC_PA5_Set(float volts);
+static void print_status(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -100,6 +142,23 @@ int __io_putchar(int ch)
   uint8_t c = (uint8_t)ch;
   HAL_UART_Transmit(&huart3, &c, 1, HAL_MAX_DELAY);
   return ch;
+}
+
+/* What's on the bus and did the sensors come up. Repeated every few seconds
+ * so a monitor or dashboard that attaches later still sees the state. */
+static void print_status(void)
+{
+  printf("I2C scan: %u device(s):", i2c_scan_result.count);
+  for (uint8_t i = 0; i < i2c_scan_result.count; i++) {
+    printf(" 0x%02X", i2c_scan_result.addr[i]);
+  }
+  printf("\r\n");
+  printf("MPU6050 init: %s\r\n", mpu6050_status_string(mpu_st));
+  printf("MLX90614 init: %s, ID=0x%04X\r\n", mlx90614_status_string(mlx_st), mlx.id_word);
+  printf("TSC1641 init: %s, addr=0x%02X, DIE_ID=0x%04X\r\n",
+         tsc1641_status_string(tsc_st), tsc.address, tsc.die_id);
+  printf("INA228 init: %s, addr=0x%02X, ID=0x%04X\r\n",
+         ina228_status_string(ina_st), ina.address, ina.device_id);
 }
 
 /* Set up DAC channel 2 on PA5 by hand (the HAL DAC module isn't generated).
@@ -170,42 +229,145 @@ int main(void)
   MX_USB_OTG_FS_PCD_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
-  HAL_Delay(200); /* let bus devices finish their own power-up before polling */
+  HAL_Delay(300); /* let bus devices finish their own power-up before polling */
   xnx_i2c_scan(&hi2c1, &i2c_scan_result);
-
-  printf("\r\n--- I2C1 bus scan (0x08-0x77) ---\r\n");
-  if (i2c_scan_result.count == 0) {
-    printf("No devices ACKed on the bus at all.\r\n");
-    printf("Check: common GND? VDD present? SCL=PB6/SDA=PB9 wired correctly (not swapped)?\r\n");
-  } else {
-    printf("%u device(s) found: ", i2c_scan_result.count);
-    for (uint8_t i = 0; i < i2c_scan_result.count; i++) {
-      printf("0x%02X ", i2c_scan_result.addr[i]);
-    }
-    printf("\r\n");
-  }
 
   DAC_PA5_Init();
   DAC_PA5_Set(0);
-  TSC1641_Init(&hi2c1);
+
+  /*
+   * Finding the two power monitors.
+   *
+   * Both of them live in the 0x40..0x4F address range and both leave the
+   * factory listening on 0x40, so the address each one ends up with depends
+   * on how its jumpers are set. Instead of hard-coding that, every address
+   * the bus scan reported is offered to both drivers in turn. Each driver
+   * reads the chip's identification register before it writes anything, so
+   * only the matching chip ever accepts the address and no driver can
+   * misconfigure a stranger. The jumpers can then be set to anything.
+   */
+  ina228_config_t ina_cfg;
+  ina228_get_default_config(&ina_cfg);
+
+  tsc1641_config_t tsc_cfg;
+  tsc1641_get_default_config(&tsc_cfg);
+
+  /* Assume missing until a chip identifies itself. */
+  ina_st = INA228_STATUS_DEVICE_NOT_FOUND;
+  tsc_st = TSC1641_STATUS_DEVICE_NOT_FOUND;
+
+  for (uint8_t i = 0; i < i2c_scan_result.count; i++) {
+    uint8_t addr = i2c_scan_result.addr[i];
+
+    if ((addr < 0x40) || (addr > 0x4F)) {
+      continue;   /* outside the power-monitor range, leave it alone */
+    }
+
+    if (!ina_ok) {
+      ina_st = ina228_init(&ina, &hi2c1, addr, &ina_cfg);
+      ina_ok = (ina_st == INA228_STATUS_OK);
+      if (ina_ok) {
+        continue;   /* address taken, move on to the next one */
+      }
+    }
+
+    if (!tsc_ok) {
+      tsc_st = tsc1641_init(&tsc, &hi2c1, addr, &tsc_cfg);
+      tsc_ok = (tsc_st == TSC1641_STATUS_OK);
+    }
+  }
+
+  mpu6050_config_t mpu_cfg;
+  mpu6050_get_default_config(&mpu_cfg);
+  mpu_st = mpu6050_init(&mpu, &hi2c1, MPU6050_ADDRESS_AD0_LOW, &mpu_cfg);
+  mpu_ok = (mpu_st == MPU6050_STATUS_OK);
+
+  mlx_st = mlx90614_init(&mlx, &hi2c1, MLX90614_DEFAULT_ADDRESS);
+  mlx_ok = (mlx_st == MLX90614_STATUS_OK);
+
+  print_status();
+  if (i2c_scan_result.count == 0) {
+    printf("Nothing ACKed. Check: common GND? VDD? SCL=PB6/SDA=PB9 not swapped?\r\n");
+  }
   /* USER CODE END 2 */
 
-  /* Infinite loop */
+  /*
+   * Main loop.
+   *
+   * Each group of sensors is read at its own rate, and the loop never
+   * blocks: instead of waiting with HAL_Delay it compares the millisecond
+   * counter against the time each group was last serviced. Motion needs a
+   * fast rate to be useful, while temperature and current change slowly,
+   * so reading everything at 100 ms would only flood the serial link.
+   */
   /* USER CODE BEGIN WHILE */
+  uint32_t t_mpu = 0, t_slow = 0, t_status = 0;  /* last service time, ms */
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    HAL_GPIO_TogglePin(GPIOB, LD1_Pin | LD2_Pin | LD3_Pin);
-    blink_count++;
-    TSC1641_Update();
-    if (tsc_online) {
-      printf("PSU set=%.3f V | I=%.4f A\r\n", psu_set_v, tsc_current_a);
-    } else {
-      printf("PSU set=%.3f V | TSC1641: no ACK on I2C (addr 0x40)\r\n", psu_set_v);
+    uint32_t now = HAL_GetTick();
+
+    /* Motion, 10 times a second. */
+    if (mpu_ok && (now - t_mpu >= 100)) {
+      t_mpu = now;
+      if (mpu6050_read(&mpu, &mpu_data) == MPU6050_STATUS_OK) {
+        /* Sent as whole milli-units (mg, mdps) so the line stays short
+         * and the receiver never has to parse a decimal point. */
+        printf("MPU A[mg]=%ld,%ld,%ld G[mdps]=%ld,%ld,%ld T[cC]=%ld\r\n",
+               (long)(mpu_data.accel_x_g * 1000), (long)(mpu_data.accel_y_g * 1000),
+               (long)(mpu_data.accel_z_g * 1000),
+               (long)(mpu_data.gyro_x_dps * 1000), (long)(mpu_data.gyro_y_dps * 1000),
+               (long)(mpu_data.gyro_z_dps * 1000),
+               (long)(mpu_data.temperature_c * 100));
+      }
     }
-    HAL_Delay(500);
+
+    /* Temperatures, load current and the heartbeat LED, twice a second. */
+    if (now - t_slow >= 500) {
+      t_slow = now;
+      HAL_GPIO_TogglePin(GPIOB, LD1_Pin | LD2_Pin | LD3_Pin);
+      blink_count++;
+
+      if (mlx_ok) {
+        if (mlx90614_read(&mlx, &mlx_data) == MLX90614_STATUS_OK) {
+          printf("MLX Ta[cC]=%ld To[cC]=%ld\r\n",
+                 (long)mlx_data.ambient_centi_c, (long)mlx_data.object_centi_c);
+        }
+      }
+
+      /*
+       * Both monitors report in amps, volts and watts. Six decimals are
+       * needed because one step of the INA228 is only 19 uA, and the
+       * shunt voltage is printed as well: it is the honest answer to
+       * "is any current flowing at all", since it is what the chip
+       * physically measures before any calibration is applied.
+       */
+      if (tsc_ok) {
+        if (tsc1641_read(&tsc, &tsc_data) == TSC1641_STATUS_OK) {
+          printf("TSC I[A]=%.6f U[V]=%.3f P[W]=%.3f Vsh[mV]=%.3f\r\n",
+                 tsc_data.current_a, tsc_data.load_voltage_v,
+                 tsc_data.power_w, tsc_data.shunt_voltage_mv);
+        }
+      }
+
+      if (ina_ok) {
+        if (ina228_read(&ina, &ina_data) == INA228_STATUS_OK) {
+          printf("INA I[A]=%.6f U[V]=%.3f P[W]=%.3f T[C]=%.2f Vsh[mV]=%.3f\r\n",
+                 ina_data.current_a, ina_data.bus_voltage_v, ina_data.power_w,
+                 ina_data.die_temperature_c, ina_data.shunt_voltage_mv);
+        }
+      }
+
+      printf("PSU set[V]=%.3f\r\n", psu_set_v);
+    }
+
+    /* Remind whoever is listening what the bus state is. */
+    if (now - t_status >= 5000) {
+      t_status = now;
+      print_status();
+    }
   }
   /* USER CODE END 3 */
 }

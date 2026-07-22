@@ -1,49 +1,98 @@
 #ifndef TSC1641_H
 #define TSC1641_H
 
+#include <stdint.h>
+#include "xnx_i2c.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
- * TSC1641 power monitor (on the STEVAL-DIGAFEV1 eval board).
+ * TSC1641 — power monitor on the STEVAL-DIGAFEV1 eval board.
  *
- * Wiring here: I2C1, PB6 = SCL, PB9 = SDA. The board has 4.7k pull-ups
- * (JP_SDA/JP_SCL), address jumpers JP_A0/JP_A1 on GND -> 0x40, and a
- * 5 mOhm shunt (R6).
- *
- * Usage:
- *   TSC1641_Init(&hi2c1);   // once, after MX_I2C1_Init()
- *   TSC1641_Update();       // periodically; then read the tsc_* globals
+ * Wiring here: I2C1, PB6 = SCL, PB9 = SDA. The board carries 4.7k
+ * pull-ups (JP_SDA/JP_SCL), address jumpers JP_A0/JP_A1 on GND -> 0x40,
+ * and a 5 mOhm shunt (R6).
  */
 
-#include <stdint.h>
-#include "main.h"
+/* JP_A1/JP_A0 jumper positions, datasheet DS14338 Table 6. The pins must
+   never be left floating: pull the jumpers off and the address is
+   anyone's guess. */
+#define TSC1641_ADDRESS_A1GND_A0GND      0x40U
+#define TSC1641_ADDRESS_A1GND_A0VS       0x41U
+#define TSC1641_ADDRESS_A1VS_A0GND       0x42U
+#define TSC1641_ADDRESS_A1VS_A0VS        0x43U
 
-#define TSC1641_ADDR         0x40
+#define TSC1641_REG_CONF                 0x00U
+#define TSC1641_REG_VSHUNT               0x01U
+#define TSC1641_REG_VLOAD                0x02U
+#define TSC1641_REG_POWER                0x03U
+#define TSC1641_REG_CURRENT              0x04U
+#define TSC1641_REG_FLAGS                0x07U
+#define TSC1641_REG_RSHUNT               0x08U
+#define TSC1641_REG_DIE_ID               0xFFU
 
-#define TSC1641_REG_CONF     0x00
-#define TSC1641_REG_VSHUNT   0x01  /* LSB 2.5 uV, signed */
-#define TSC1641_REG_VLOAD    0x02  /* LSB 2 mV */
-#define TSC1641_REG_POWER    0x03  /* LSB 25 mW */
-#define TSC1641_REG_CURRENT  0x04  /* LSB = 2.5 uV / Rshunt, signed */
-#define TSC1641_REG_RSHUNT   0x08  /* LSB 10 uOhm */
+#define TSC1641_DIE_ID_VALUE             0x1000U
 
-/* Note: the datasheet register table (DS14338) says 0x03 = power and
- * 0x04 = current, but there are reports of the two being swapped on real
- * silicon. If current and power look exchanged, swap the defines above. */
+/*
+ * Note: the register table in DS14338 lists 0x03 as power and 0x04 as
+ * current, but there are reports of the two being swapped on real
+ * silicon. If current and power come out exchanged, swap the defines.
+ */
 
-#define TSC1641_RSHUNT_10UOHM  500   /* 5 mOhm shunt in 10-uOhm units */
+typedef enum
+{
+    TSC1641_STATUS_OK = 0,
+    TSC1641_STATUS_INVALID_ARGUMENT,
+    TSC1641_STATUS_I2C_ERROR,
+    TSC1641_STATUS_DEVICE_NOT_FOUND,
+    TSC1641_STATUS_BAD_DEVICE_ID
+} tsc1641_status_t;
 
-/* Measurements, refreshed by TSC1641_Update(). volatile so Live Watch
- * and the main loop always see fresh values. */
-extern volatile float   tsc_current_a;   /* load current, A (signed) */
-extern volatile float   tsc_vload_v;     /* load voltage, V */
-extern volatile float   tsc_power_w;     /* power, W */
-extern volatile int16_t tsc_vshunt_raw;  /* raw shunt register, LSB 2.5 uV */
-extern volatile uint8_t tsc_online;      /* 1 = last I2C exchange OK */
+typedef struct
+{
+    float shunt_ohms;    /* R6 on the eval board is 5 mOhm */
+} tsc1641_config_t;
 
-/* Start continuous conversion and program the shunt value.
- * Returns 1 on success, 0 if the chip doesn't answer. */
-uint8_t TSC1641_Init(I2C_HandleTypeDef *hi2c);
+typedef struct
+{
+    I2C_HandleTypeDef *hi2c;
+    uint8_t address;
+    uint16_t die_id;
+    float current_lsb_a;
+    uint8_t initialized;
+} tsc1641_t;
 
-/* Read all measurements into the tsc_* globals. */
-void TSC1641_Update(void);
+typedef struct
+{
+    int16_t current_raw;
+    int16_t shunt_raw;
+    int16_t load_raw;
+    int16_t power_raw;
+
+    float current_a;         /* signed: shows direction of flow */
+    float load_voltage_v;
+    float power_w;
+    float shunt_voltage_mv;
+} tsc1641_data_t;
+
+void tsc1641_get_default_config(tsc1641_config_t *config);
+
+tsc1641_status_t tsc1641_init(
+    tsc1641_t *device,
+    I2C_HandleTypeDef *hi2c,
+    uint8_t address,
+    const tsc1641_config_t *config);
+
+tsc1641_status_t tsc1641_read(
+    tsc1641_t *device,
+    tsc1641_data_t *data);
+
+const char *tsc1641_status_string(tsc1641_status_t status);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* TSC1641_H */
