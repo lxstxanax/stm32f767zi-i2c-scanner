@@ -146,20 +146,40 @@ class SerialWorker(QtCore.QThread):
             self.disconnected.emit(self.port)
 
 
+# Mid greys stay readable on a light and on a dark desktop theme alike,
+# which the dimmed palette roles do not.
+TITLE_COLOR = "#8b949e"
+UNIT_COLOR = "#6e7781"
+ACCENT_COLOR = "#4dabf7"
+
+CARD_STYLE = """
+QFrame {
+    border: 1px solid palette(mid);
+    border-radius: 6px;
+}
+"""
+
+
 class MetricCard(QtWidgets.QFrame):
+    """Compact readout: small caption, big number, unit underneath."""
+
     def __init__(self, title: str, unit: str = "", parent=None):
         super().__init__(parent)
         self.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.setStyleSheet(CARD_STYLE)
 
         self.title = QtWidgets.QLabel(title)
         self.value = QtWidgets.QLabel("—")
         self.unit = QtWidgets.QLabel(unit)
 
-        self.value.setStyleSheet("font-size: 29px; font-weight: 650;")
-        self.title.setStyleSheet("font-size: 13px;")
-        self.unit.setStyleSheet("font-size: 12px;")
+        self.title.setStyleSheet(f"border: none; font-size: 10px; color: {TITLE_COLOR};")
+        self.value.setStyleSheet("border: none; font-size: 18px; font-weight: 650;")
+        self.unit.setStyleSheet(f"border: none; font-size: 9px; color: {UNIT_COLOR};")
+        self.setMaximumHeight(58)
 
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(0)
         layout.addWidget(self.title)
         layout.addWidget(self.value)
         layout.addWidget(self.unit)
@@ -169,18 +189,26 @@ class MetricCard(QtWidgets.QFrame):
 
 
 class TextStatusCard(QtWidgets.QFrame):
+    """Same size as a MetricCard, but holds a short phrase."""
+
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
         self.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.setStyleSheet(CARD_STYLE)
 
         self.title = QtWidgets.QLabel(title)
         self.value = QtWidgets.QLabel("—")
         self.value.setWordWrap(True)
-        self.value.setStyleSheet("font-size: 20px; font-weight: 600;")
+
+        self.title.setStyleSheet(f"border: none; font-size: 10px; color: {TITLE_COLOR};")
+        self.value.setStyleSheet("border: none; font-size: 13px; font-weight: 600;")
+        self.setMaximumHeight(58)
 
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(0)
         layout.addWidget(self.title)
-        layout.addWidget(self.value)
+        layout.addWidget(self.value, 1)
 
     def set_value(self, value: str) -> None:
         self.value.setText(value)
@@ -188,6 +216,27 @@ class TextStatusCard(QtWidgets.QFrame):
 
 class Dashboard(QtWidgets.QMainWindow):
     MAX_POINTS = 900
+
+    # tab name, plot title, y label, y units, [(deque name, legend, colour)]
+    PLOTS = [
+        ("Current", "Current", "Current", "A", [
+            ("tsc_current", "TSC1641", "#2ecc71"),
+            ("ina_current", "INA228", "#e67e22"),
+        ]),
+        ("Tilt", "Board tilt", "Angle", "°", [
+            ("roll", "Roll (X)", "#4dabf7"),
+            ("pitch", "Pitch (Y)", "#ff922b"),
+        ]),
+        ("Motion", "Motion", "Value", "", [
+            ("accel_total", "Acceleration, g", "#51cf66"),
+            ("gyro_total", "Rotation, °/s", "#cc5de8"),
+        ]),
+        ("Temperature", "Temperature", "Temperature", "°C", [
+            ("mpu_temp", "MPU6050", "#ff6b6b"),
+            ("mlx_ambient", "MLX90614 ambient", "#22b8cf"),
+            ("mlx_object", "MLX90614 object", "#fcc419"),
+        ]),
+    ]
 
     def __init__(self):
         super().__init__()
@@ -287,6 +336,8 @@ class Dashboard(QtWidgets.QMainWindow):
         root.addLayout(control)
 
         cards = QtWidgets.QGridLayout()
+        cards.setSpacing(5)
+        cards.setContentsMargins(0, 0, 0, 0)
 
         self.cards = {
             "tsc_current": MetricCard("Current", "TSC1641, A"),
@@ -331,8 +382,8 @@ class Dashboard(QtWidgets.QMainWindow):
         for title, keys in sections:
             header = QtWidgets.QLabel(title)
             header.setStyleSheet(
-                "font-size: 12px; font-weight: 700; letter-spacing: 1px;"
-                "color: palette(mid); margin-top: 6px;"
+                "font-size: 11px; font-weight: 700; letter-spacing: 1px;"
+                f"color: {ACCENT_COLOR}; margin-top: 4px;"
             )
             cards.addWidget(header, row, 0, 1, columns)
             row += 1
@@ -346,63 +397,36 @@ class Dashboard(QtWidgets.QMainWindow):
         for column in range(columns):
             cards.setColumnStretch(column, 1)
 
-        root.addLayout(cards)
+        # The block of cards keeps its natural height so that everything
+        # left over goes to the plots below.
+        cards_panel = QtWidgets.QWidget()
+        cards_panel.setLayout(cards)
+        cards_panel.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
+                                  QtWidgets.QSizePolicy.Maximum)
+        root.addWidget(cards_panel)
 
         note = QtWidgets.QLabel(
             "Tilt is derived from gravity. During strong motion the "
             "accelerometer-based angles are temporarily less accurate."
         )
         note.setWordWrap(True)
+        note.setStyleSheet(f"font-size: 11px; color: {UNIT_COLOR};")
         root.addWidget(note)
 
         self.tabs = QtWidgets.QTabWidget()
         root.addWidget(self.tabs, 1)
 
-        self.orientation_plot = pg.PlotWidget(title="Board tilt")
-        self.orientation_plot.setLabel("left", "Angle", units="°")
-        self.orientation_plot.setLabel("bottom", "Time", units="s")
-        self.orientation_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.orientation_plot.addLegend()
-        self.roll_curve = self.orientation_plot.plot(
-            name="Roll (X)", pen=pg.mkPen("#4dabf7", width=2))
-        self.pitch_curve = self.orientation_plot.plot(
-            name="Pitch (Y)", pen=pg.mkPen("#ff922b", width=2))
-        self.tabs.addTab(self.orientation_plot, "Tilt")
+        # Every curve is described once. Each entry names the deque that
+        # feeds it, so the same description builds both the single-plot
+        # tabs and the overview page, and drawing them stays one loop.
+        self.curve_sets = []
 
-        self.motion_plot = pg.PlotWidget(title="Motion")
-        self.motion_plot.setLabel("left", "Value")
-        self.motion_plot.setLabel("bottom", "Time", units="s")
-        self.motion_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.motion_plot.addLegend()
-        self.accel_curve = self.motion_plot.plot(
-            name="Acceleration, g", pen=pg.mkPen("#51cf66", width=2))
-        self.gyro_curve = self.motion_plot.plot(
-            name="Rotation, °/s", pen=pg.mkPen("#cc5de8", width=2))
-        self.tabs.addTab(self.motion_plot, "Motion")
+        for tab_name, title, y_label, y_units, series in self.PLOTS:
+            plot, curves = self._make_plot(title, y_label, y_units, series)
+            self.tabs.addTab(plot, tab_name)
+            self.curve_sets.append(curves)
 
-        self.temp_plot = pg.PlotWidget(title="Temperature")
-        self.temp_plot.setLabel("left", "Temperature", units="°C")
-        self.temp_plot.setLabel("bottom", "Time", units="s")
-        self.temp_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.temp_plot.addLegend()
-        self.mpu_temp_curve = self.temp_plot.plot(
-            name="MPU6050", pen=pg.mkPen("#ff6b6b", width=2))
-        self.mlx_ambient_curve = self.temp_plot.plot(
-            name="MLX90614 ambient", pen=pg.mkPen("#22b8cf", width=2))
-        self.mlx_object_curve = self.temp_plot.plot(
-            name="MLX90614 object", pen=pg.mkPen("#fcc419", width=2))
-        self.tabs.addTab(self.temp_plot, "Temperature")
-
-        self.current_plot = pg.PlotWidget(title="Current")
-        self.current_plot.setLabel("left", "Current", units="A")
-        self.current_plot.setLabel("bottom", "Time", units="s")
-        self.current_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.current_plot.addLegend()
-        self.tsc_current_curve = self.current_plot.plot(
-            name="TSC1641", pen=pg.mkPen("#2ecc71", width=2))
-        self.ina_current_curve = self.current_plot.plot(
-            name="INA228", pen=pg.mkPen("#e67e22", width=2))
-        self.tabs.addTab(self.current_plot, "Current")
+        self.tabs.addTab(self._make_overview(), "All graphs")
 
         self.diagnostics = QtWidgets.QPlainTextEdit()
         self.diagnostics.setReadOnly(True)
@@ -472,6 +496,43 @@ class Dashboard(QtWidgets.QMainWindow):
             or "0x68" in lowered
             or "0x5a" in lowered
         )
+
+    def _make_plot(self, title, y_label, y_units, series):
+        """Build one plot. Returns it together with {deque name: curve}."""
+        plot = pg.PlotWidget(title=title)
+        plot.setLabel("left", y_label, units=y_units or None)
+        plot.setLabel("bottom", "Time", units="s")
+        plot.showGrid(x=True, y=True, alpha=0.2)
+        plot.addLegend(offset=(-10, 10))
+        plot.setMenuEnabled(False)
+
+        curves = {}
+        for source, legend, colour in series:
+            curves[source] = plot.plot(name=legend,
+                                       pen=pg.mkPen(colour, width=2))
+        return plot, curves
+
+    def _make_overview(self) -> QtWidgets.QWidget:
+        """One scrollable page holding a copy of every plot, stacked."""
+        page = QtWidgets.QWidget()
+        column = QtWidgets.QVBoxLayout(page)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(6)
+
+        combined = {}
+        for _, title, y_label, y_units, series in self.PLOTS:
+            plot, curves = self._make_plot(title, y_label, y_units, series)
+            plot.setMinimumHeight(200)
+            column.addWidget(plot)
+            combined.update(curves)
+
+        self.curve_sets.append(combined)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidget(page)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        return scroll
 
     def send_command(self, text: str) -> None:
         if not (self.worker and self.worker.isRunning()
@@ -688,15 +749,19 @@ class Dashboard(QtWidgets.QMainWindow):
             return
 
         x = list(self.t)
-        self.roll_curve.setData(x, self._clean(self.roll))
-        self.pitch_curve.setData(x, self._clean(self.pitch))
-        self.accel_curve.setData(x, self._clean(self.accel_total))
-        self.gyro_curve.setData(x, self._clean(self.gyro_total))
-        self.mpu_temp_curve.setData(x, self._clean(self.mpu_temp))
-        self.mlx_ambient_curve.setData(x, self._clean(self.mlx_ambient))
-        self.mlx_object_curve.setData(x, self._clean(self.mlx_object))
-        self.tsc_current_curve.setData(x, self._clean(self.tsc_current))
-        self.ina_current_curve.setData(x, self._clean(self.ina_current))
+        cache = {}
+
+        # Only the visible page is redrawn; the rest catches up when it is
+        # opened, which keeps the overview page from costing anything while
+        # a single plot is on screen.
+        visible = self.tabs.currentIndex()
+        if visible >= len(self.curve_sets):
+            return
+
+        for source, curve in self.curve_sets[visible].items():
+            if source not in cache:
+                cache[source] = self._clean(getattr(self, source))
+            curve.setData(x, cache[source])
 
     def toggle_recording(self, enabled: bool) -> None:
         if enabled:
@@ -795,6 +860,14 @@ class Dashboard(QtWidgets.QMainWindow):
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("STM32 Sensor Dashboard")
+
+    # Follow the desktop theme instead of pyqtgraph's own default, and
+    # smooth the lines - thin traces look ragged without it.
+    palette = app.palette()
+    pg.setConfigOption("background", palette.window().color())
+    pg.setConfigOption("foreground", palette.windowText().color())
+    pg.setConfigOptions(antialias=True)
+
     window = Dashboard()
     window.show()
     return app.exec()
