@@ -105,6 +105,17 @@ class SerialWorker(QtCore.QThread):
             except Exception:
                 pass
 
+    def send_line(self, text: str) -> bool:
+        """Send one command to the board. Returns False if not connected."""
+        if not (self._serial and self._serial.is_open):
+            return False
+        try:
+            self._serial.write((text + "\n").encode("ascii"))
+            return True
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return False
+
     def run(self) -> None:
         try:
             self._serial = serial.Serial(
@@ -249,50 +260,91 @@ class Dashboard(QtWidgets.QMainWindow):
         status_layout.addStretch()
         root.addLayout(status_layout)
 
+        # Control of the DAC output on PA5, the voltage that tells the
+        # power supply what to produce. Slider and number box show the same
+        # value; the board only ever changes it when told to.
+        control = QtWidgets.QHBoxLayout()
+        control.addWidget(QtWidgets.QLabel("PSU setpoint (DAC on PA5):"))
+
+        self.setpoint_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.setpoint_slider.setRange(0, 3300)      # millivolts
+        self.setpoint_slider.setSingleStep(10)
+        self.setpoint_slider.setPageStep(100)
+
+        self.setpoint_spin = QtWidgets.QDoubleSpinBox()
+        self.setpoint_spin.setRange(0.0, 3.3)
+        self.setpoint_spin.setDecimals(3)
+        self.setpoint_spin.setSingleStep(0.05)
+        self.setpoint_spin.setSuffix(" V")
+
+        self.setpoint_apply = QtWidgets.QPushButton("Apply")
+        self.setpoint_zero = QtWidgets.QPushButton("Zero")
+
+        control.addWidget(self.setpoint_slider, 1)
+        control.addWidget(self.setpoint_spin)
+        control.addWidget(self.setpoint_apply)
+        control.addWidget(self.setpoint_zero)
+        root.addLayout(control)
+
         cards = QtWidgets.QGridLayout()
 
         self.cards = {
+            "tsc_current": MetricCard("Current", "TSC1641, A"),
+            "ina_current": MetricCard("Current", "INA228, A"),
+            "tsc_shunt": MetricCard("Shunt drop", "TSC1641, mV"),
+            "ina_shunt": MetricCard("Shunt drop", "INA228, mV"),
+            "tsc_voltage": MetricCard("Load voltage", "TSC1641, V"),
+            "ina_voltage": MetricCard("Bus voltage", "INA228, V"),
+            "psu_setpoint": MetricCard("PSU setpoint", "DAC output, V"),
+            "ina_power": MetricCard("Power", "INA228, W"),
             "object_temp": MetricCard("Object temperature", "MLX90614, °C"),
             "sensor_temp": MetricCard("IR sensor temperature", "MLX90614, °C"),
             "mpu_temp": MetricCard("IMU temperature", "MPU6050, °C"),
+            "thermal": TextStatusCard("Object vs sensor"),
             "roll": MetricCard("Roll (around X)", "degrees"),
             "pitch": MetricCard("Pitch (around Y)", "degrees"),
             "accel": MetricCard("Total acceleration", "g"),
             "gyro": MetricCard("Rotation rate", "°/s"),
             "motion": TextStatusCard("Motion state"),
-            "thermal": TextStatusCard("Object vs sensor"),
-            "tsc_current": MetricCard("Current (TSC1641)", "A"),
-            "tsc_voltage": MetricCard("Load voltage (TSC1641)", "V"),
-            "ina_current": MetricCard("Current (INA228)", "A"),
-            "ina_voltage": MetricCard("Bus voltage (INA228)", "V"),
-            "ina_power": MetricCard("Power (INA228)", "W"),
-            "psu_setpoint": MetricCard("PSU setpoint (DAC)", "V"),
-            "tsc_shunt": MetricCard("Shunt drop (TSC1641)", "mV"),
-            "ina_shunt": MetricCard("Shunt drop (INA228)", "mV"),
         }
 
-        positions = [
-            ("object_temp", 0, 0),
-            ("sensor_temp", 0, 1),
-            ("mpu_temp", 0, 2),
-            ("roll", 0, 3),
-            ("pitch", 1, 0),
-            ("accel", 1, 1),
-            ("gyro", 1, 2),
-            ("motion", 1, 3),
-            ("thermal", 2, 0),
-            ("tsc_current", 2, 1),
-            ("tsc_voltage", 2, 2),
-            ("psu_setpoint", 2, 3),
-            ("tsc_shunt", 2, 3),
-            ("ina_current", 3, 0),
-            ("ina_voltage", 3, 1),
-            ("ina_power", 3, 2),
-            ("ina_shunt", 3, 3),
+        # Sorted by physical quantity rather than by chip, so the two
+        # current sensors sit next to each other and can be compared at a
+        # glance. Rows are filled automatically, which makes it impossible
+        # for two cards to end up in the same cell.
+        sections = [
+            ("Electrical", [
+                "tsc_current", "ina_current", "tsc_shunt", "ina_shunt",
+                "tsc_voltage", "ina_voltage", "psu_setpoint", "ina_power",
+            ]),
+            ("Temperature", [
+                "object_temp", "sensor_temp", "mpu_temp", "thermal",
+            ]),
+            ("Motion", [
+                "roll", "pitch", "accel", "gyro", "motion",
+            ]),
         ]
 
-        for key, row, col in positions:
-            cards.addWidget(self.cards[key], row, col)
+        columns = 4
+        row = 0
+
+        for title, keys in sections:
+            header = QtWidgets.QLabel(title)
+            header.setStyleSheet(
+                "font-size: 12px; font-weight: 700; letter-spacing: 1px;"
+                "color: palette(mid); margin-top: 6px;"
+            )
+            cards.addWidget(header, row, 0, 1, columns)
+            row += 1
+
+            for index, key in enumerate(keys):
+                cards.addWidget(self.cards[key], row + index // columns,
+                                index % columns)
+
+            row += (len(keys) + columns - 1) // columns
+
+        for column in range(columns):
+            cards.setColumnStretch(column, 1)
 
         root.addLayout(cards)
 
@@ -361,6 +413,13 @@ class Dashboard(QtWidgets.QMainWindow):
         self.connect_button.clicked.connect(self.toggle_connection)
         self.record_button.toggled.connect(self.toggle_recording)
 
+        self.setpoint_slider.valueChanged.connect(
+            lambda mv: self.setpoint_spin.setValue(mv / 1000.0))
+        self.setpoint_spin.valueChanged.connect(
+            lambda v: self.setpoint_slider.setValue(round(v * 1000)))
+        self.setpoint_apply.clicked.connect(self.apply_setpoint)
+        self.setpoint_zero.clicked.connect(self.zero_setpoint)
+
     def refresh_ports(self) -> None:
         current = self.port_combo.currentText()
         ports = sorted(set(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")))
@@ -413,6 +472,21 @@ class Dashboard(QtWidgets.QMainWindow):
             or "0x68" in lowered
             or "0x5a" in lowered
         )
+
+    def send_command(self, text: str) -> None:
+        if not (self.worker and self.worker.isRunning()
+                and self.worker.send_line(text)):
+            self.diagnostics.appendPlainText(
+                f"[DASHBOARD] Not connected, command dropped: {text}")
+            return
+        self.diagnostics.appendPlainText(f"[DASHBOARD] Sent: {text}")
+
+    def apply_setpoint(self) -> None:
+        self.send_command(f"set {self.setpoint_spin.value():.3f}")
+
+    def zero_setpoint(self) -> None:
+        self.setpoint_spin.setValue(0.0)
+        self.send_command("set 0")
 
     def handle_line(self, line: str) -> None:
         self.diagnostics.appendPlainText(line)

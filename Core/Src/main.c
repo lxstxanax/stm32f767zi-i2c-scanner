@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "string.h"
+#include <stdlib.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -50,6 +51,7 @@
 xnx_i2c_scan_t i2c_scan_result;
 volatile uint32_t blink_count = 0;
 volatile float psu_set_v = 0;   /* last voltage written to the DAC on PA5 */
+volatile float psu_measured_v = 0;  /* what the ADC reads back on PA3 */
 
 /*
  * Four sensors share the single I2C1 bus (SCL = PB6, SDA = PB9):
@@ -132,7 +134,12 @@ static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 void DAC_PA5_Init(void);
 void DAC_PA5_Set(float volts);
+void ADC_PA3_Init(void);
+float ADC_PA3_Read(void);
 static void print_status(void);
+static void command_start(void);
+static void command_run(const char *line);
+static void monitors_recover(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -142,6 +149,104 @@ int __io_putchar(int ch)
   uint8_t c = (uint8_t)ch;
   HAL_UART_Transmit(&huart3, &c, 1, HAL_MAX_DELAY);
   return ch;
+}
+
+/*
+ * Commands arriving on the same serial line that carries the readings.
+ *
+ * Characters are collected one at a time in the UART interrupt, which
+ * costs almost nothing and never makes the main loop wait. Once a whole
+ * line has arrived it is handed over to the main loop: acting on it from
+ * inside an interrupt would be poor practice, since printing a reply
+ * takes far longer than an interrupt should ever last.
+ *
+ * Understood commands:
+ *   set <volts>   set the DAC output on PA5, e.g. "set 1.5"
+ *   status        report the sensors again
+ *   clobber       wipe the TSC1641 calibration on purpose, to prove that
+ *                 the automatic recovery really works
+ */
+#define COMMAND_MAX_LENGTH 32
+
+static char command_line[COMMAND_MAX_LENGTH];
+static volatile uint8_t command_length = 0;
+static volatile uint8_t command_complete = 0;
+static uint8_t command_rx_byte = 0;
+
+static void command_start(void)
+{
+  HAL_NVIC_SetPriority(USART3_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(USART3_IRQn);
+  HAL_UART_Receive_IT(&huart3, &command_rx_byte, 1);
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance != USART3) {
+    return;
+  }
+
+  /* Ignore anything new until the main loop has taken the last line. */
+  if (!command_complete) {
+    if ((command_rx_byte == '\r') || (command_rx_byte == '\n')) {
+      if (command_length > 0) {
+        command_line[command_length] = '\0';
+        command_complete = 1;
+      }
+    } else if (command_length < (COMMAND_MAX_LENGTH - 1)) {
+      command_line[command_length++] = (char)command_rx_byte;
+    }
+  }
+
+  HAL_UART_Receive_IT(&huart3, &command_rx_byte, 1);
+}
+
+static void command_run(const char *line)
+{
+  if (strncmp(line, "set ", 4) == 0) {
+    /* strtof avoids pulling the floating point version of scanf in. */
+    DAC_PA5_Set(strtof(line + 4, NULL));
+    printf("OK set[V]=%.3f\r\n", psu_set_v);
+  } else if (strcmp(line, "status") == 0) {
+    print_status();
+  } else if (strcmp(line, "clobber") == 0) {
+    /* Exactly what a brown-out does to the chip: clears the shunt value. */
+    xnx_i2c_write_reg16(&hi2c1, tsc.address, TSC1641_REG_RSHUNT, 0);
+    printf("TSC1641 shunt register wiped, recovery should notice\r\n");
+  } else {
+    printf("ERR unknown command: %s\r\n", line);
+  }
+}
+
+/*
+ * Put a power monitor back on its feet if it lost its settings.
+ *
+ * A sensor whose supply dips for a moment restarts with empty registers.
+ * The microcontroller keeps running and never notices, so from then on the
+ * chip answers politely but reports a current of exactly zero, because
+ * without the shunt value it has no way to convert its measurement. This
+ * check reads the calibration back and reprograms the chip if it no longer
+ * matches, which turns a silent wrong reading into a short gap.
+ */
+static void monitors_recover(void)
+{
+  if (tsc_ok && (tsc1641_check(&tsc) != TSC1641_STATUS_OK)) {
+    tsc1641_config_t cfg;
+    tsc1641_get_default_config(&cfg);
+    tsc_st = tsc1641_init(&tsc, &hi2c1, tsc.address, &cfg);
+    tsc_ok = (tsc_st == TSC1641_STATUS_OK);
+    printf("TSC1641 lost its settings, reconfigured: %s\r\n",
+           tsc1641_status_string(tsc_st));
+  }
+
+  if (ina_ok && (ina228_check(&ina) != INA228_STATUS_OK)) {
+    ina228_config_t cfg;
+    ina228_get_default_config(&cfg);
+    ina_st = ina228_init(&ina, &hi2c1, ina.address, &cfg);
+    ina_ok = (ina_st == INA228_STATUS_OK);
+    printf("INA228 lost its settings, reconfigured: %s\r\n",
+           ina228_status_string(ina_st));
+  }
 }
 
 /* What's on the bus and did the sensors come up. Repeated every few seconds
@@ -176,6 +281,62 @@ void DAC_PA5_Init(void)
 
   DAC->DHR12R2 = 0;          /* start at 0 V */
   DAC->CR |= DAC_CR_EN2;     /* enable channel 2 = PA5 */
+}
+
+/*
+ * Analog input on PA3 (Arduino header A0), read with ADC1 channel 3.
+ *
+ * Set up by hand for the same reason as the DAC: the HAL ADC module is
+ * not generated for this project. With a jumper from PA5 to PA3 the board
+ * measures its own DAC output, which is the only way to see on screen
+ * that the analog output really does what it was told - and it is the
+ * first channel of the measuring chain the project needs anyway.
+ */
+void ADC_PA3_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  GPIO_InitStruct.Pin = GPIO_PIN_3;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  __HAL_RCC_ADC1_CLK_ENABLE();
+
+  /* The ADC may not run faster than 36 MHz, and APB2 is at 108 MHz here,
+   * so divide it by four. */
+  ADC->CCR = (ADC->CCR & ~ADC_CCR_ADCPRE) | ADC_CCR_ADCPRE_0;
+
+  /* Longest sample time (480 cycles) on channel 3: it costs a few
+   * microseconds and lets the internal capacitor charge fully even from a
+   * source with high resistance, which keeps the reading honest. */
+  ADC1->SMPR2 = 7UL << (3U * 3U);
+
+  ADC1->SQR1 = 0;   /* one conversion in the sequence */
+  ADC1->SQR3 = 3;   /* and that conversion reads channel 3 */
+
+  ADC1->CR1 = 0;    /* 12-bit resolution, no interrupts */
+  ADC1->CR2 = ADC_CR2_ADON;
+  HAL_Delay(1);     /* let the ADC settle after power-up */
+}
+
+/* Voltage on PA3, averaged over a few conversions to calm the noise. */
+float ADC_PA3_Read(void)
+{
+  const uint8_t samples = 16;
+  uint32_t sum = 0;
+
+  for (uint8_t i = 0; i < samples; i++) {
+    ADC1->SR &= ~ADC_SR_EOC;
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    while ((ADC1->SR & ADC_SR_EOC) == 0) {
+      /* a single conversion takes a few microseconds */
+    }
+    sum += ADC1->DR;
+  }
+
+  /* 12 bits over the 3.3 V reference: 4095 counts = 3.3 V. */
+  return ((float)sum / samples) * 3.3f / 4095.0f;
 }
 
 /* Set the PA5 output voltage, 0..3.3 V (assumes VDDA = 3.3 V).
@@ -234,6 +395,7 @@ int main(void)
 
   DAC_PA5_Init();
   DAC_PA5_Set(0);
+  ADC_PA3_Init();
 
   /*
    * Finding the two power monitors.
@@ -289,6 +451,9 @@ int main(void)
   if (i2c_scan_result.count == 0) {
     printf("Nothing ACKed. Check: common GND? VDD? SCL=PB6/SDA=PB9 not swapped?\r\n");
   }
+
+  command_start();
+  printf("Commands: 'set <volts>' (DAC on PA5), 'status'\r\n");
   /* USER CODE END 2 */
 
   /*
@@ -308,6 +473,13 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     uint32_t now = HAL_GetTick();
+
+    /* A command finished arriving in the interrupt: act on it here. */
+    if (command_complete) {
+      command_run(command_line);
+      command_length = 0;
+      command_complete = 0;
+    }
 
     /* Motion, 10 times a second. */
     if (mpu_ok && (now - t_mpu >= 100)) {
@@ -360,12 +532,15 @@ int main(void)
         }
       }
 
-      printf("PSU set[V]=%.3f\r\n", psu_set_v);
+      psu_measured_v = ADC_PA3_Read();
+      printf("PSU set[V]=%.3f meas[V]=%.3f\r\n", psu_set_v, psu_measured_v);
     }
 
-    /* Remind whoever is listening what the bus state is. */
+    /* Remind whoever is listening what the bus state is, and make sure
+     * the power monitors still hold their calibration. */
     if (now - t_status >= 5000) {
       t_status = now;
+      monitors_recover();
       print_status();
     }
   }

@@ -67,6 +67,7 @@ typedef struct
     I2C_HandleTypeDef *hi2c;
     uint8_t address;
     uint16_t device_id;
+    uint16_t shunt_cal;        /* what was programmed, for the health check */
     float current_lsb_a;
     ina228_range_t range;
     uint8_t initialized;
@@ -97,6 +98,9 @@ ina228_status_t ina228_init(
 ina228_status_t ina228_read(
     ina228_t *device,
     ina228_data_t *data);
+
+/* Confirm the chip still holds its calibration - see tsc1641_check(). */
+ina228_status_t ina228_check(ina228_t *device);
 
 const char *ina228_status_string(ina228_status_t status);
 

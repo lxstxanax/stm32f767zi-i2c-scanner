@@ -249,10 +249,12 @@ ina228_status_t ina228_init(
         shunt_cal = INA228_SHUNT_CAL_MAX;
     }
 
+    device->shunt_cal = (uint16_t)(shunt_cal + 0.5f);
+
     status = ina228_write_word(
         device,
         INA228_REG_SHUNT_CAL,
-        (uint16_t)(shunt_cal + 0.5f));
+        device->shunt_cal);
 
     if (status != INA228_STATUS_OK)
     {
@@ -334,6 +336,33 @@ ina228_status_t ina228_read(
     }
 
     data->die_temperature_c = (float)(int16_t)raw_word * INA228_DIETEMP_C_PER_LSB;
+
+    return INA228_STATUS_OK;
+}
+
+ina228_status_t ina228_check(ina228_t *device)
+{
+    uint16_t shunt_cal = 0U;
+
+    if ((device == NULL) || (device->initialized == 0U))
+    {
+        return INA228_STATUS_INVALID_ARGUMENT;
+    }
+
+    ina228_status_t status =
+        ina228_read_word(device, INA228_REG_SHUNT_CAL, &shunt_cal);
+
+    if (status != INA228_STATUS_OK)
+    {
+        return status;
+    }
+
+    /* The reset value is 0x1000, so a chip that restarted no longer
+       matches the calibration we calculated for our shunt. */
+    if (shunt_cal != device->shunt_cal)
+    {
+        return INA228_STATUS_DEVICE_NOT_FOUND;
+    }
 
     return INA228_STATUS_OK;
 }

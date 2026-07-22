@@ -143,6 +143,8 @@ tsc1641_status_t tsc1641_init(
         return status;
     }
 
+    device->shunt_register = rshunt_register;
+
     /*
      * What one count of the current register is worth, by Ohm's law: the
      * smallest shunt voltage the chip can resolve is 2.5 uV, so across a
@@ -210,6 +212,32 @@ tsc1641_status_t tsc1641_read(
     data->shunt_raw = (int16_t)raw;
     data->shunt_voltage_mv =
         (float)data->shunt_raw * TSC1641_VSHUNT_V_PER_LSB * 1000.0f;
+
+    return TSC1641_STATUS_OK;
+}
+
+tsc1641_status_t tsc1641_check(tsc1641_t *device)
+{
+    uint16_t rshunt = 0U;
+
+    if ((device == NULL) || (device->initialized == 0U))
+    {
+        return TSC1641_STATUS_INVALID_ARGUMENT;
+    }
+
+    tsc1641_status_t status =
+        tsc1641_read_word(device, TSC1641_REG_RSHUNT, &rshunt);
+
+    if (status != TSC1641_STATUS_OK)
+    {
+        return status;
+    }
+
+    /* An empty shunt register means the chip restarted behind our back. */
+    if (rshunt != device->shunt_register)
+    {
+        return TSC1641_STATUS_DEVICE_NOT_FOUND;
+    }
 
     return TSC1641_STATUS_OK;
 }

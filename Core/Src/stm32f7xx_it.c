@@ -200,4 +200,13 @@ void SysTick_Handler(void)
 
 /* USER CODE BEGIN 1 */
 
+/* USART3 is the ST-Link virtual COM port. Its interrupt is what lets the
+ * board receive commands while the main loop keeps measuring. */
+extern UART_HandleTypeDef huart3;
+
+void USART3_IRQHandler(void)
+{
+  HAL_UART_IRQHandler(&huart3);
+}
+
 /* USER CODE END 1 */

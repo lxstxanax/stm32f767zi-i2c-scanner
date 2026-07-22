@@ -60,6 +60,7 @@ typedef struct
     I2C_HandleTypeDef *hi2c;
     uint8_t address;
     uint16_t die_id;
+    uint16_t shunt_register;   /* what was programmed, for the health check */
     float current_lsb_a;
     uint8_t initialized;
 } tsc1641_t;
@@ -88,6 +89,15 @@ tsc1641_status_t tsc1641_init(
 tsc1641_status_t tsc1641_read(
     tsc1641_t *device,
     tsc1641_data_t *data);
+
+/*
+ * Confirm the chip still holds the settings it was given. A sensor that
+ * briefly lost power comes back with empty registers, and without the
+ * shunt value it reports a current of exactly zero while still measuring
+ * a shunt voltage - a silent failure that is easy to mistake for "no
+ * current is flowing".
+ */
+tsc1641_status_t tsc1641_check(tsc1641_t *device);
 
 const char *tsc1641_status_string(tsc1641_status_t status);
 
